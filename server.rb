@@ -1,15 +1,92 @@
+require "rubygems"
+require "bundler/setup"
+
 require 'sinatra/base'
 require 'erb'
-require 'resque'
-require 'resque/version'
+# require 'resque'
+# require 'resque/version'
 require 'time'
+
+require 'sidekiq'
+
+module Resque
+  extend self
+
+  
+
+    def redis
+      @sidekiq_redis ||= Sidekiq::RedisConnection.create({ use_pool: false })
+
+      #If there is no namespace defined, should this be here but just be null?
+      def @sidekiq_redis.namespace
+        nil
+      end
+      @sidekiq_redis
+    end
+
+    def queues
+      redis.keys("queue:*").map{ |q| q.split(':')[1] }
+    end  
+
+    def size queue
+      redis.llen("queue:#{queue}")
+    end
+
+    def workers
+      []
+    end
+
+    def working
+      []
+    end
+
+    def list_range(key, start = 0, count = 1)
+    if count == 1
+      decode redis.lindex(key, start)
+    else
+      Array(redis.lrange(key, start, start+count-1)).map do |item|
+        decode item
+      end
+    end
+  end
+
+  def decode payload
+    MultiJson.decode payload
+  end
+
+    def peek(queue, start = 0, count = 1)
+      list_range("queue:#{queue}", start, count)
+    end
+
+    def redis_id
+      # support 1.x versions of redis-rb
+      if redis.respond_to?(:server)
+        redis.server
+      elsif redis.respond_to?(:nodes) # distributed
+        redis.nodes.map { |n| n.id }.join(', ')
+      else
+        redis.client.id
+      end
+    end
+
+    module Version
+      123
+    end
+
+    class Failure
+      def self.count 
+        0
+      end
+    end
+
+end
 
 module Resque
   class Server < Sinatra::Base
     dir = File.dirname(File.expand_path(__FILE__))
 
-    set :views,  "#{dir}/server/views"
-    set :public, "#{dir}/server/public"
+    set :views,  "#{dir}/views"
+    set :public, "#{dir}/public"
     set :static, true
 
     helpers do
@@ -48,32 +125,32 @@ module Resque
       end
 
       def redis_get_size(key)
-        case Resque.redis.type(key)
+        case redis.type(key)
         when 'none'
           []
         when 'list'
-          Resque.redis.llen(key)
+          redis.llen(key)
         when 'set'
-          Resque.redis.scard(key)
+          redis.scard(key)
         when 'string'
-          Resque.redis.get(key).length
+          redis.get(key).length
         when 'zset'
-          Resque.redis.zcard(key)
+          redis.zcard(key)
         end
       end
 
       def redis_get_value_as_array(key, start=0)
-        case Resque.redis.type(key)
+        case redis.type(key)
         when 'none'
           []
         when 'list'
-          Resque.redis.lrange(key, start, start + 20)
+          redis.lrange(key, start, start + 20)
         when 'set'
-          Resque.redis.smembers(key)[start..(start + 20)]
+          redis.smembers(key)[start..(start + 20)]
         when 'string'
-          [Resque.redis.get(key)]
+          [redis.get(key)]
         when 'zset'
-          Resque.redis.zrange(key, start, start + 20)
+          redis.zrange(key, start, start + 20)
         end
       end
 
@@ -116,6 +193,9 @@ module Resque
         "<p class='poll'>#{text}</p>"
       end
 
+
+      
+
     end
 
     def show(page, layout = true)
@@ -123,7 +203,7 @@ module Resque
       begin
         erb page.to_sym, {:layout => layout}, :resque => Resque
       rescue Errno::ECONNREFUSED
-        erb :error, {:layout => false}, :error => "Can't connect to Redis! (#{Resque.redis_id})"
+        erb :error, {:layout => false}, :error => "Can't connect to Redis! (#{redis_id})"
       end
     end
 
