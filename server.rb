@@ -9,38 +9,68 @@ require 'time'
 
 require 'sidekiq'
 
+class SomeWorker
+
+  attr_reader :to_s
+  attr_reader :job
+
+  def initialize package
+    @to_s = package[:id]
+    @job = package[:payload]  
+  end
+
+  def state
+  end
+
+  def idle?
+    false
+  end
+end
+
 module Resque
   extend self
 
-  
+  def redis
+    @sidekiq_redis ||= Sidekiq::RedisConnection.create({ use_pool: false })
 
-    def redis
-      @sidekiq_redis ||= Sidekiq::RedisConnection.create({ use_pool: false })
-
-      #If there is no namespace defined, should this be here but just be null?
-      def @sidekiq_redis.namespace
-        nil
-      end
-      @sidekiq_redis
+    #If there is no namespace defined, should this be here but just be null?
+    def @sidekiq_redis.namespace
+      nil
     end
+    @sidekiq_redis
+  end
 
-    def queues
-      redis.keys("queue:*").map{ |q| q.split(':')[1] }
-    end  
+  def queues
+    redis.smembers("resque:queues")
+  end  
 
-    def size queue
-      redis.llen("queue:#{queue}")
-    end
+  def size queue
+    redis.llen("resque:queue:#{queue}")
+  end
 
-    def workers
-      []
-    end
+  def workers
+    redis.smembers('resque:workers').map{
+      |worker| 
+      #Hack, this should be a SomeWorker class, analagous to the Worker class in Resque
+      def worker.state; "Unknown"; end
+      def worker.processing; {} ; end
 
-    def working
-      []
-    end
+      worker
+    }
+  end
 
-    def list_range(key, start = 0, count = 1)
+  def working
+    working_workers = workers.map do |worker|
+      entry = redis.get("resque:worker:#{worker}")
+      next unless entry
+      SomeWorker.new({
+        :id => "resque:worker:#{worker}",
+        :payload => MultiJson.decode(entry)
+        })
+    end.compact
+  end
+
+  def list_range(key, start = 0, count = 1)
     if count == 1
       decode redis.lindex(key, start)
     else
@@ -54,34 +84,34 @@ module Resque
     MultiJson.decode payload
   end
 
-    def peek(queue, start = 0, count = 1)
-      list_range("queue:#{queue}", start, count)
-    end
+  def peek(queue, start = 0, count = 1)
+    list_range("resque:queue:#{queue}", start, count)
+  end
 
-    def redis_id
-      # support 1.x versions of redis-rb
-      if redis.respond_to?(:server)
-        redis.server
-      elsif redis.respond_to?(:nodes) # distributed
-        redis.nodes.map { |n| n.id }.join(', ')
-      else
-        redis.client.id
-      end
+  def redis_id
+    # support 1.x versions of redis-rb
+    if redis.respond_to?(:server)
+      redis.server
+    elsif redis.respond_to?(:nodes) # distributed
+      redis.nodes.map { |n| n.id }.join(', ')
+    else
+      redis.client.id
     end
+  end
 
-    module Version
-      123
-    end
+  module Version
+    123
+  end
 
-    class Failure
-      def self.count 
-        0
-      end
+  class Failure
+    def self.count 
+      0
     end
+  end
 
 end
 
-module Resque
+  module Resque
   class Server < Sinatra::Base
     dir = File.dirname(File.expand_path(__FILE__))
 
